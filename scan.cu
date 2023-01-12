@@ -69,14 +69,14 @@ __device__ __forceinline__ int pad(const int i)
     return i + i / 16;
 }
 
-__global__ void scan_padding(float *g_odata, float *g_idata, int n)
+__global__ void scan_padding(float *g_odata, float *g_idata, const int n)
 {
     extern __shared__ float data[];
     int i = threadIdx.x;
     if (2 * i < n)
     {
-        data[pad(2 * i)] = g_idata[2 * i];
-        data[pad(2 * i + 1)] = g_idata[2 * i + 1];
+        data[pad(i)] = g_idata[i];
+        data[pad(i + n / 2)] = g_idata[i + n / 2];
     }
     __syncthreads();
     int depth_power;
@@ -101,7 +101,7 @@ __global__ void scan_padding(float *g_odata, float *g_idata, int n)
     }
     if (2 * i < n)
     {
-        g_odata[2 * i] = data[pad(2 * i)];
-        g_odata[2 * i + 1] = data[pad(2 * i + 1)];
+        g_odata[i] = data[pad(i)];
+        g_odata[i + n / 2] = data[pad(i + n / 2)];
     }
 }
