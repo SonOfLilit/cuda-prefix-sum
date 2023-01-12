@@ -75,12 +75,12 @@ __global__ void scan_padding(float *g_odata, float *g_idata, int n)
     int i = threadIdx.x;
     if (2 * i < n)
     {
-        data[pad(2 * i)] = g_idata[pad(2 * i)];
-        data[pad(2 * i + 1)] = g_idata[pad(2 * i + 1)];
+        data[pad(2 * i)] = g_idata[2 * i];
+        data[pad(2 * i + 1)] = g_idata[2 * i + 1];
     }
     __syncthreads();
-    int depth_power = 1;
-    for (; depth_power < n; depth_power <<= 1)
+    int depth_power;
+    for (depth_power = 1; depth_power < n; depth_power <<= 1)
     {
         int offset = 2 * depth_power * (i + 1) - 1;
         if (offset < n)
@@ -89,10 +89,11 @@ __global__ void scan_padding(float *g_odata, float *g_idata, int n)
         }
         __syncthreads();
     }
-    for (depth_power >>= 1; depth_power >= 1; depth_power >>= 1)
+    depth_power >>= 1;
+    for (; depth_power >= 1; depth_power >>= 1)
     {
         int offset = 2 * depth_power * (i + 1) - 1;
-        if (offset < n)
+        if (offset + depth_power < n)
         {
             data[pad(offset + depth_power)] += data[pad(offset)];
         }
