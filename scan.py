@@ -1,22 +1,25 @@
 import numpy as np
 import numpy.typing as npt
 
-test_nums = [3, 1, 7, 0, 4, 1, 6, 3]
+test_nums = np.array([3, 1, 7, 0, 4, 1, 6, 3])
 # 32 is the largest size that works for GPU scans that need 2x shared mem
 random_test_nums = np.random.random_sample(32).astype(np.float32)
-def cumsum(x):
-    result = []
-    s = 0
-    for a in x:
-        s += a
-        result.append(s)
-    return result
-assert cumsum([3, 2, 1]) == [3, 5, 6]
-assert cumsum([3, 1, 7]) == [3, 4, 11]
+test_cases = [
+    (np.array([0]), np.array([0])),
+    (np.array([1, 2, 3]), np.array([1, 3, 6])),
+    (test_nums, test_nums.cumsum()),
+    (np.arange(32), np.arange(32).cumsum()),
+    (np.ones(32), np.arange(1, 33)),
+    (random_test_nums, random_test_nums.cumsum()),
+] + [(np.ones(i), np.arange(1, i + 1)) for i in range(32)]
+def test(scan_func):
+    for input, output in test_cases:
+        result = scan_func(input)
+        assert np.allclose(result, output), (input, result, output, output - result)
 
 T = 32
-def scan_slow(x, n):
-    assert len(x) == n
+def scan_slow(x):
+    n = len(x)
     data = [list(x), [None] * n]
     depth_power = 1
     # double buffering
@@ -32,8 +35,7 @@ def scan_slow(x, n):
         depth_power *= 2
         a, b = b, a
     return data[a]
-assert scan_slow(test_nums, len(test_nums)) == cumsum(test_nums)
-assert np.allclose(scan_slow(random_test_nums, len(random_test_nums)), cumsum(random_test_nums))
+test(scan_slow)
 
 f = lambda x, depth_power: 2*depth_power*(x + 1) - 1
 ff = lambda depth_power: [f(x, depth_power) for x in range(4)]
@@ -43,28 +45,31 @@ f = lambda x, depth_power: 2*depth_power*(x + 1) - 1 - depth_power
 assert ff(1) == [0, 2, 4, 6], ff(1)
 assert ff(2) == [1, 5, 9, 13], ff(2)
 
-def scan(x, n):
+def scan(x):
+    n = len(x)
     data = list(x)
     depth_power = 1
     while depth_power < n:
         for i in range(T): # GPU similator
-            if depth_power * i < n // 2:
-                data[2 * depth_power * (i + 1) - 1] += data[2 * depth_power * (i + 1) - 1 - depth_power]
+            offset = 2 * depth_power * (i + 1) - 1
+            if offset < n:
+                data[offset] += data[offset - depth_power]
         depth_power *= 2
 
     depth_power //= 2
     while depth_power >= 1:
         for i in range(T): # GPU similator
-            if depth_power * (i + 1) < n // 2:
-                data[2 * depth_power * (i + 1) - 1 + depth_power] += data[2 * depth_power * (i + 1) - 1]
+            offset = 2 * depth_power * (i + 1) - 1
+            if offset + depth_power < n:
+                data[offset + depth_power] += data[offset]
         depth_power //= 2
     return data
-assert scan(test_nums, len(test_nums)) == cumsum(test_nums)
-assert np.allclose(scan(random_test_nums, len(random_test_nums)), cumsum(random_test_nums))
+test(scan)
 
 BANKS = 4
-def scan_padding(x, n):
-    data = [-1] * (T * BANKS)
+def scan_padding(x):
+    n = len(x)
+    data = [-1] * (n + n // BANKS + 1)
     
     for i in range(T): # GPU similator
         if i < n:
@@ -73,8 +78,8 @@ def scan_padding(x, n):
     depth_power = 1
     while depth_power < n:
         for i in range(T): # GPU similator
-            if depth_power * i < n // 2:
-                ai = 2 * depth_power * (i + 1) - 1
+            ai = 2 * depth_power * (i + 1) - 1
+            if ai <= n:
                 bi = 2 * depth_power * (i + 1) - 1 - depth_power
                 data[ai + ai // BANKS] += data[bi + bi // BANKS]
         depth_power *= 2
@@ -82,8 +87,8 @@ def scan_padding(x, n):
     depth_power //= 2
     while depth_power >= 1:
         for i in range(T): # GPU similator
-            if depth_power <= depth_power * (i + 1) < n // 2:
-                ai = 2 * depth_power * (i + 1) - 1 + depth_power
+            ai = 2 * depth_power * (i + 1) - 1 + depth_power
+            if ai <= n:
                 bi = 2 * depth_power * (i + 1) - 1
                 data[ai + ai // BANKS] += data[bi + bi // BANKS]
         depth_power //= 2
@@ -94,62 +99,13 @@ def scan_padding(x, n):
             out[i] = data[i + i // BANKS]
 
     return out
-assert scan_padding(test_nums, len(test_nums)) == cumsum(test_nums)
-assert np.allclose(scan_padding(random_test_nums, len(random_test_nums)), cumsum(random_test_nums))
+test(scan_padding)
 
 import pycuda.driver as cuda
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
 
-mod = SourceModule("""
-__global__ void scan_slow(float *g_odata, float *g_idata, const int n) {
-    extern __shared__ float data[];
-    int i = threadIdx.x;
-    // double buffering indexes
-    int a = 0, b = 1;
-    data[b * n + i] = g_idata[i];
-    __syncthreads();
-    for (int depth_power = 1; depth_power < n; depth_power *= 2) {
-        // swap double buffer indices
-        a = 1 - a;
-        b = 1 - b;
-
-        if (i >= depth_power) {
-            data[b * n + i] = data[a * n + i] + data[a * n + i - depth_power];
-        } else {
-            data[b * n + i] = data[a * n + i];
-        }
-        __syncthreads();
-    }
-    g_odata[i] = data[b * n + i];
-}
-
-__global__ void scan(float *g_odata, float *g_idata, const int n) {
-    extern __shared__ float data[];
-    int i = threadIdx.x;
-    data[2 * i] = g_idata[2 * i];
-    data[2 * i + 1] = g_idata[2 * i + 1];
-    __syncthreads();
-    int depth_power = 1;
-    for (; depth_power < n; depth_power <<= 1) {
-        if (depth_power * i < n / 2) {
-            data[2 * depth_power * (i + 1) - 1] += data[2 * depth_power * (i + 1) - 1 - depth_power];
-        }
-        __syncthreads();
-    }
-    for (depth_power >>= 1; depth_power >= 1; depth_power >>= 1) {
-        if (depth_power * (i + 1) <= n / 2) {
-            data[2 * depth_power * (i + 1) - 1 + depth_power] += data[2 * depth_power * (i + 1) - 1];
-        }
-        __syncthreads();
-    }
-    g_odata[2 * i] = data[2 * i];
-    g_odata[2 * i + 1] = data[2 * i + 1];
-}
-
-__global__ void scan_padding(float *g_odata, float *g_idata, int n) {
-    extern __shared__ float data[];
-}""")
+mod = SourceModule(open("scan.cu").read())
 
 scan_slow_cuda = mod.get_function("scan_slow")
 scan_cuda = mod.get_function("scan")
@@ -159,37 +115,38 @@ def scan_slow_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
     x = np.array(data, dtype=np.float32)
     dest = np.zeros_like(x)
     n = len(x)
+    if n == 0:
+        return dest
     scan_slow_cuda(
         cuda.Out(dest), cuda.In(x), np.int32(n),
-        block=(n,1,1), grid=(1,1), shared=2*n)
+        block=(max(n, 1), 1, 1), grid=(1,1), shared=2*n)
     return dest
 result = scan_slow_gpu(test_nums)
-assert np.allclose(result, cumsum(test_nums)), result
-assert np.allclose(scan_slow_gpu(random_test_nums), cumsum(random_test_nums))
+test(scan_slow_gpu)
 
 def scan_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
     x = np.array(data, dtype=np.float32)
     dest = np.zeros_like(x)
     n = len(x)
+    if n == 0:
+        return dest
     scan_cuda(
         cuda.Out(dest), cuda.In(x), np.int32(n),
-        block=(n // 2, 1, 1), grid=(1,1), shared=n)
+        block=((n + 1) // 2, 1, 1), grid=(1,1), shared=n)
     return dest
-result = scan_gpu(test_nums)
-assert np.allclose(result, cumsum(test_nums)), result
-assert np.allclose(scan_gpu(random_test_nums), cumsum(random_test_nums))
+test(scan_gpu)
 
 def scan_padding_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
     x = np.array(data, dtype=np.float32)
     dest = np.zeros_like(x)
     n = len(x)
+    if n == 0:
+        return dest
     scan_padding_cuda(
         cuda.Out(dest), cuda.In(x), np.int32(n),
-        block=(n // 2,1,1), grid=(1,1), shared=2*n)
+        block=((n + 1) // 2, 1, 1), grid=(1, 1), shared=n + n // 16)
     return dest
-result = scan_padding_gpu(test_nums)
-assert np.allclose(result, cumsum(test_nums)), result
-assert np.allclose(scan_padding_gpu(random_test_nums), cumsum(random_test_nums))
+test(scan_padding_gpu)
 
 a = np.random.random_sample(32).astype(np.float32)
-print((scan_gpu(a) - a.cumsum()))
+print((scan_padding_gpu(a) - a.cumsum()))
