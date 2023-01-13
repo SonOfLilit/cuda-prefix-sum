@@ -175,5 +175,33 @@ def scan_padding_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
     return dest
 test(scan_padding_gpu)
 
+add_cuda = mod.get_function("add")
+def stream_test(a):
+    x = np.array(a, dtype=np.float32)
+    n = len(x)
+    if n == 0:
+        return
+    s = cuda.Stream()
+    x_gpu = cuda.mem_alloc(x.nbytes)
+    t_gpu = cuda.mem_alloc(x.nbytes)
+    cuda.memcpy_htod_async(x_gpu, x, stream=s)
+    cuda.memcpy_dtod_async(t_gpu, x_gpu, x.nbytes, stream=s)
+    add_cuda(
+        t_gpu, x_gpu, np.int32(n), stream=s,
+        block=((n + 1) // 2, 1, 1), grid=(1,1))
+    add_cuda(
+        x_gpu, t_gpu, np.int32(n), stream=s,
+        block=((n + 1) // 2, 1, 1), grid=(1,1))
+    add_cuda(
+        t_gpu, x_gpu, np.int32(n), stream=s,
+        block=((n + 1) // 2, 1, 1), grid=(1,1))
+    s.synchronize()
+    cuda.memcpy_dtoh(x, t_gpu)
+    assert np.allclose(x / 5.0, a), (a, x)
+import itertools
+for i in itertools.chain(range(32), range(33, 2048 + 1, 11)):
+    stream_test(list(range(i)))
+    stream_test(np.random.random_sample(i).astype(np.float32))
+
 a = np.random.random_sample(2048).astype(np.float32)
 print((scan_padding_gpu(a) - a.cumsum()).max())

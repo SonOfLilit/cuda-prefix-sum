@@ -48,6 +48,17 @@ __global__ void copy(float *g_odata, float *g_idata, const int n)
     }
 }
 
+__global__ void add(float *g_odata, float *g_idata, const int n)
+{
+    int i = threadIdx.x;
+    g_odata[i] += g_idata[i];
+    i += (n + 1) / 2;
+    if (i < n)
+    {
+        g_odata[i] += g_idata[i];
+    }
+}
+
 __global__ void scan(float *g_odata, float *g_idata, const int n)
 {
     extern __shared__ float data[];
@@ -97,10 +108,11 @@ __global__ void scan_padding(float *g_odata, float *g_idata, const int n)
 {
     extern __shared__ float data[];
     int i = threadIdx.x;
-    if (2 * i < n)
+    data[pad(i)] = g_idata[i];
+    int k = i + (n + 1) / 2;
+    if (k < n)
     {
-        data[pad(i)] = g_idata[i];
-        data[pad(i + n / 2)] = g_idata[i + n / 2];
+        data[pad(k)] = g_idata[k];
     }
     __syncthreads();
     int depth_power;
@@ -123,9 +135,9 @@ __global__ void scan_padding(float *g_odata, float *g_idata, const int n)
         }
         __syncthreads();
     }
-    if (2 * i < n)
+    g_odata[i] = data[pad(i)];
+    if (k < n)
     {
-        g_odata[i] = data[pad(i)];
-        g_odata[i + n / 2] = data[pad(i + n / 2)];
+        g_odata[k] = data[pad(k)];
     }
 }
