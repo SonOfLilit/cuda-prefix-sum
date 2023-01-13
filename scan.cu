@@ -28,13 +28,37 @@ __global__ void scan_slow(float *g_odata, float *g_idata, const int n)
     g_odata[i] = data[b * n + i];
 }
 
+__global__ void copy(float *g_odata, float *g_idata, const int n)
+{
+    extern __shared__ float data[];
+
+    int i = threadIdx.x;
+    __syncthreads();
+    data[2 * i] = g_idata[2 * i];
+    if (2 * i + 1 < n)
+    {
+        data[2 * i + 1] = g_idata[2 * i + 1];
+    }
+    __syncthreads();
+
+    g_odata[2 * i] = data[2 * i];
+    if (2 * i + 1 < n)
+    {
+        g_odata[2 * i + 1] = data[2 * i + 1];
+    }
+}
+
 __global__ void scan(float *g_odata, float *g_idata, const int n)
 {
     extern __shared__ float data[];
     int i = threadIdx.x;
+    __syncthreads();
     if (2 * i < n)
     {
         data[2 * i] = g_idata[2 * i];
+    }
+    if (2 * i + 1 < n)
+    {
         data[2 * i + 1] = g_idata[2 * i + 1];
     }
     __syncthreads();
@@ -51,7 +75,7 @@ __global__ void scan(float *g_odata, float *g_idata, const int n)
     for (depth_power >>= 1; depth_power >= 1; depth_power >>= 1)
     {
         int offset = 2 * depth_power * (i + 1) - 1;
-        if (offset < n)
+        if (offset + depth_power < n)
         {
             data[offset + depth_power] += data[offset];
         }

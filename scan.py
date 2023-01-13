@@ -14,7 +14,11 @@ test_cases = [
 ] + [(np.ones(i), np.arange(1, i + 1)) for i in range(32)]
 def test(scan_func):
     for input, output in test_cases:
-        result = scan_func(input)
+        try:
+            result = scan_func(input)
+        except:
+            print(len(input), input)
+            raise
         assert np.allclose(result, output), (input, result, output, output - result)
 
 T = 32
@@ -111,6 +115,20 @@ scan_slow_cuda = mod.get_function("scan_slow")
 scan_cuda = mod.get_function("scan")
 scan_padding_cuda = mod.get_function("scan_padding")
 
+copy_cuda = mod.get_function("copy")
+def copy_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
+    x = np.array(data, dtype=np.float32)
+    dest = np.zeros_like(x)
+    n = len(x)
+    if n == 0:
+        return dest
+    copy_cuda(
+        cuda.Out(dest), cuda.In(x), np.int32(n),
+        block=((n + 1) // 2, 1, 1), grid=(1,1), shared=4*n)
+    return dest
+for i in range(2048 + 1):
+    assert np.allclose(copy_gpu(np.arange(i)), np.arange(i))
+
 def scan_slow_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
     x = np.array(data, dtype=np.float32)
     dest = np.zeros_like(x)
@@ -119,9 +137,14 @@ def scan_slow_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
         return dest
     scan_slow_cuda(
         cuda.Out(dest), cuda.In(x), np.int32(n),
-        block=(max(n, 1), 1, 1), grid=(1,1), shared=2*n)
+        block=(n, 1, 1), grid=(1,1), shared=2 * 4 * n)
     return dest
-result = scan_slow_gpu(test_nums)
+
+test_cases += [
+  (np.ones(i), np.arange(1, i + 1))
+  for i in [33, 63, 64, 65, 127, 128, 129, 256, 512, 1024]
+]
+
 test(scan_slow_gpu)
 
 def scan_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
@@ -132,8 +155,12 @@ def scan_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
         return dest
     scan_cuda(
         cuda.Out(dest), cuda.In(x), np.int32(n),
-        block=((n + 1) // 2, 1, 1), grid=(1,1), shared=n)
+        block=((n + 1) // 2, 1, 1), grid=(1,1), shared=4*n)
     return dest
+test_cases += [
+  (np.ones(i), np.arange(1, i + 1))
+  for i in [1025, 2047, 2048]
+]
 test(scan_gpu)
 
 def scan_padding_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
@@ -144,9 +171,9 @@ def scan_padding_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
         return dest
     scan_padding_cuda(
         cuda.Out(dest), cuda.In(x), np.int32(n),
-        block=((n + 1) // 2, 1, 1), grid=(1, 1), shared=n + n // 16)
+        block=((n + 1) // 2, 1, 1), grid=(1, 1), shared=4*(n + n // 16))
     return dest
 test(scan_padding_gpu)
 
-a = np.random.random_sample(32).astype(np.float32)
-print((scan_padding_gpu(a) - a.cumsum()))
+a = np.random.random_sample(2048).astype(np.float32)
+print((scan_padding_gpu(a) - a.cumsum()).max())
