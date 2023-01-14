@@ -1,5 +1,6 @@
 import numpy as np
 import numpy.typing as npt
+np.random.seed(1)
 
 test_nums = np.array([3, 1, 7, 0, 4, 1, 6, 3])
 # 32 is the largest size that works for GPU scans that need 2x shared mem
@@ -11,25 +12,40 @@ test_cases = [
     (np.arange(32), np.arange(32).cumsum()),
     (np.ones(32), np.arange(1, 33)),
     (random_test_nums, random_test_nums.cumsum()),
-] + [(np.ones(i), np.arange(1, i + 1)) for i in range(32)]
+] + list(range(32))
+def test_case(scan_func, input, output):
+    try:
+        result = scan_func(input.copy())
+    except:
+        print(len(input), input)
+        raise
+    # errors accumulate, so we choose an absolute error rate that rises with len
+    if not np.allclose(result, output, atol=len(input) / 1e8, rtol=1e-4):
+        print(scan_func.__name__, len(input), 'failed:')
+        print(input, output)
+        print(result, result[:10])
+        delta = output - result
+        i = delta.argmin()
+        j = delta.argmax()
+        print(i, delta[i - 5:i + 5])
+        print(j, delta[i - 5:j + 5])
+        print(delta)
+        assert False
 def test(scan_func):
     try:
-        for input, output in test_cases:
-            try:
-                result = scan_func(input.copy())
-            except:
-                print(len(input), input)
-                raise
-            if not np.allclose(result, output):
-                print(scan_func.__name__, len(input), 'failed:')
-                print(input)
-                print(result, result[:10])
-                i = (output - result).argmin()
-                j = (output - result).argmax()
-                print(i, (output - result)[i - 5:i + 5])
-                print(j, (output - result)[i - 5:j + 5])
-                print(output - result)
-                assert False
+        for case in test_cases:
+            if isinstance(case, int):
+                input = np.ones(case, dtype=int)
+                output = np.arange(1, case + 1)
+                test_case(scan_func, input, output)
+                input = input.astype(np.float32)
+                output = output.astype(np.float32)
+                test_case(scan_func, input, output)
+                input = np.random.random_sample(case).astype(np.float32)
+                test_case(scan_func, input, input.cumsum())
+            else:
+                input, output = case
+                test_case(scan_func, input, output)
     except:
         import traceback
         traceback.print_exc()
@@ -158,10 +174,7 @@ def scan_large(x):
 
     return x
 
-test_cases += [
-  (np.ones(i), np.arange(1, i + 1))
-  for i in [33, 63, 64, 65, 127, 128, 129, 256, 512, 1024]
-]
+test_cases += [33, 63, 64, 65, 127, 128, 129, 256, 512, 1024]
 
 test(scan_large)
 
@@ -214,10 +227,7 @@ def scan_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
         cuda.Out(dest), cuda.In(x), np.int32(n),
         block=((n + 1) // 2, 1, 1), grid=(1,1), shared=4*n)
     return dest
-test_cases += [
-  (np.ones(i), np.arange(1, i + 1))
-  for i in [1025, 2047, 2048]
-]
+test_cases += [1025, 2047, 2048]
 test(scan_gpu)
 
 def scan_padding_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
@@ -295,11 +305,16 @@ def scan_large_gpu(x):
     s.synchronize()
 
     return x
-test_cases += [
-  (np.ones(i), np.arange(1, i + 1))
-  for i in [2049, 3000, 4095, 4096, 4097, 10000, 2048 * 1024 - 1, 2048 * 1024]
-]
+test_cases += [2049, 3000, 4095, 4096, 4097, 10000, 2048 * 100, 2048 * 1024 - 1, 2048 * 1024]
 test(scan_large_gpu)
 
-a = np.random.random_sample(2048).astype(np.float32)
-print((scan_padding_gpu(a) - a.cumsum()).max())
+import time
+a = np.random.random_sample(2048 * 1024).astype(np.float32)
+start = time.perf_counter_ns()
+g = scan_large_gpu(a)
+gpu_time = time.perf_counter_ns() - start
+start = time.perf_counter_ns()
+c = a.cumsum()
+numpy_time = time.perf_counter_ns() - start
+assert np.allclose(g, c, atol=1., rtol=1e-3), (g - c)
+print('gpu', gpu_time, 'numpy', numpy_time)

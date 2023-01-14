@@ -108,7 +108,8 @@ __device__ void do_scan_padding(float *g_odata, float *g_idata, const int n, flo
 {
     int base = 2 * blockDim.x * blockIdx.x;
     int i = threadIdx.x;
-    if (2 * i < n) {
+    if (2 * i < n)
+    {
         data[pad(i)] = g_idata[base + i];
     }
     int k = i + (n + 1) / 2;
@@ -137,7 +138,8 @@ __device__ void do_scan_padding(float *g_odata, float *g_idata, const int n, flo
         }
         __syncthreads();
     }
-    if (2 * i < n) {
+    if (2 * i < n)
+    {
         g_odata[base + i] = data[pad(i)];
     }
     if (k < n)
