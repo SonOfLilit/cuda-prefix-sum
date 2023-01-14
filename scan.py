@@ -15,7 +15,7 @@ test_cases = [
 def test(scan_func):
     for input, output in test_cases:
         try:
-            result = scan_func(input)
+            result = scan_func(input.copy())
         except:
             print(len(input), input)
             raise
