@@ -3,7 +3,6 @@ import numpy.typing as npt
 np.random.seed(1)
 
 test_nums = np.array([3, 1, 7, 0, 4, 1, 6, 3])
-# 32 is the largest size that works for GPU scans that need 2x shared mem
 random_test_nums = np.random.random_sample(32).astype(np.float32)
 test_cases = [
     (np.array([0]), np.array([0])),
@@ -270,41 +269,57 @@ for i in itertools.chain(range(32), range(33, 2048 + 1, 11)):
     stream_test(list(range(i)))
     stream_test(np.random.random_sample(i).astype(np.float32))
 
-def scan_large_gpu(x):
-    threads = 1024
-    block = 2 * threads
+threads = 1024
+block = 2 * threads
+bytes_in_float = 4
+def scan_large_gpu(x, stream=None):
+    x = np.asarray(x, dtype=np.float32)
     n = len(x)
     if n <= block:
         return scan_gpu(x)
-    x_ = np.asarray(x, dtype=np.float32)
-    x = cuda.pagelocked_empty_like(x_)
-    x[:] = x_
+    if stream is None:
+        stream = cuda.Stream()
+    x_pinned, x_gpu, sums_gpu = prepare_array(x, stream=stream)
+    scan_large_gpu_array_async(x_gpu, sums_gpu, n, stream=stream)
+    cuda.memcpy_dtoh_async(x_pinned, x_gpu, stream=stream)
+    stream.synchronize()
+    return x_pinned
+
+def scan_large_gpu_inplace(x, stream=None):
+    x_pinned = scan_large_gpu(x, stream)
+    x[:] = x_pinned
+    return x
+
+def prepare_array(x, stream=None):
+    blocks = (len(x) + block - 1) // block
+    x_pinned = cuda.pagelocked_empty_like(x)
+    x_pinned[:] = x
+    x_gpu = cuda.mem_alloc(x.nbytes)
+    sums_gpu = cuda.mem_alloc(blocks * bytes_in_float)
+    cuda.memcpy_htod_async(x_gpu, x, stream=stream)
+    return x_pinned, x_gpu, sums_gpu
+
+def scan_large_gpu_array(x_gpu, sums_gpu, n, stream):
+    scan_large_gpu_array_async(x_gpu, sums_gpu, n, stream)
+    stream.synchronize()
+
+def scan_large_gpu_array_async(x_gpu, sums_gpu, n, stream):
     max_streams = threads
     assert n <= block * max_streams
     blocks = (n + block - 1) // block
 
-    s = cuda.Stream()
-    x_gpu = cuda.mem_alloc(x.nbytes)
-    bytes_in_float = 4
-    sums_gpu = cuda.mem_alloc(blocks * bytes_in_float)
-    cuda.memcpy_htod_async(x_gpu, x, stream=s)
-
     scan_padding_sums_cuda(
-        x_gpu, x_gpu, np.int32(n), sums_gpu, stream=s,
+        x_gpu, x_gpu, np.int32(n), sums_gpu, stream=stream,
         block=(threads, 1, 1), grid=(blocks, 1), shared=bytes_in_float * (block + block // 16))
 
     scan_padding_cuda(
-        sums_gpu, sums_gpu, np.int32(blocks), stream=s,
+        sums_gpu, sums_gpu, np.int32(blocks), stream=stream,
         block=((blocks + 1) // 2, 1, 1), grid=(1,1), shared=bytes_in_float * (blocks + blocks // 16))
 
-    add_sums_cuda(x_gpu, sums_gpu, np.int32(n), stream=s,
-        block=(threads, 1, 1), grid=(blocks - 1, 1))
+    if n > block:
+        add_sums_cuda(x_gpu, sums_gpu, np.int32(n), stream=stream,
+            block=(threads, 1, 1), grid=(blocks - 1, 1))
 
-    cuda.memcpy_dtoh_async(x, x_gpu, stream=s)
-
-    s.synchronize()
-
-    return x
 test_cases += [2049, 3000, 4095, 4096, 4097, 10000, 2048 * 100, 2048 * 1024 - 1, 2048 * 1024]
 test(scan_large_gpu)
 
@@ -316,5 +331,31 @@ gpu_time = time.perf_counter_ns() - start
 start = time.perf_counter_ns()
 c = a.cumsum()
 numpy_time = time.perf_counter_ns() - start
-assert np.allclose(g, c, atol=1., rtol=1e-3), (g - c)
+print(np.allclose(g, c, atol=len(a) / 1e8, rtol=1e-4))
+assert np.allclose(g, c, atol=len(a)/1e8, rtol=1e-4), (g - c)
 print('gpu', gpu_time, 'numpy', numpy_time)
+
+import timeit
+gpu_times = []
+numpy_times = []
+full_a = a
+for i in range(1, 22):
+    a = full_a[:2**i]
+    gpu_time = timeit.timeit(lambda: scan_large_gpu(a), number=10)
+    gpu_times.append(gpu_time)
+    numpy_time = timeit.timeit(lambda: a.cumsum(), number=10)
+    numpy_times.append(numpy_time)
+print('gpu', gpu_times, 'numpy', numpy_times)
+
+gpu_times = []
+numpy_times = []
+full_a = a
+s = cuda.Stream()
+for i in range(1, 22):
+    a = full_a[:2**i]
+    x_pinned, x_gpu, sums_gpu = prepare_array(a)
+    gpu_time = timeit.timeit(lambda: scan_large_gpu_array(x_gpu, sums_gpu, len(a), s), number=10)
+    gpu_times.append(gpu_time)
+    numpy_time = timeit.timeit(lambda: a.cumsum(), number=10)
+    numpy_times.append(numpy_time)
+print('gpu', gpu_times, 'numpy', numpy_times)
