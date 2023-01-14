@@ -104,15 +104,17 @@ __device__ __forceinline__ int pad(const int i)
     return i + i / 16;
 }
 
-__global__ void scan_padding(float *g_odata, float *g_idata, const int n)
+__device__ void do_scan_padding(float *g_odata, float *g_idata, const int n, float *data)
 {
-    extern __shared__ float data[];
+    int base = 2 * blockDim.x * blockIdx.x;
     int i = threadIdx.x;
-    data[pad(i)] = g_idata[i];
+    if (2 * i < n) {
+        data[pad(i)] = g_idata[base + i];
+    }
     int k = i + (n + 1) / 2;
     if (k < n)
     {
-        data[pad(k)] = g_idata[k];
+        data[pad(k)] = g_idata[base + k];
     }
     __syncthreads();
     int depth_power;
@@ -135,9 +137,48 @@ __global__ void scan_padding(float *g_odata, float *g_idata, const int n)
         }
         __syncthreads();
     }
-    g_odata[i] = data[pad(i)];
+    if (2 * i < n) {
+        g_odata[base + i] = data[pad(i)];
+    }
     if (k < n)
     {
-        g_odata[k] = data[pad(k)];
+        g_odata[base + k] = data[pad(k)];
+    }
+}
+
+__global__ void scan_padding(float *g_odata, float *g_idata, const int n)
+{
+    assert(blockIdx.x == 0);
+    extern __shared__ float data[];
+    do_scan_padding(g_odata, g_idata, n, data);
+}
+
+__global__ void scan_padding_sums(float *g_odata, float *g_idata, const int n, float *g_sums)
+{
+    extern __shared__ float data[];
+    const int block = 2 * blockDim.x;
+    const int blockN = min(block, n - block * blockIdx.x);
+    do_scan_padding(g_odata, g_idata, blockN, data);
+    __syncthreads();
+    if (threadIdx.x == 0)
+    {
+        g_sums[blockIdx.x] = g_odata[block * blockIdx.x + blockN - 1];
+    }
+}
+
+__global__ void add_sums(float *g_data, float *g_sums, const int n)
+{
+    const int block = 2 * blockDim.x;
+    const int base = (blockIdx.x + 1) * block;
+    const int blockN = min(block, n - base);
+    int i = threadIdx.x;
+    if (2 * i < blockN)
+    {
+        g_data[base + i] += g_sums[blockIdx.x];
+    }
+    int k = i + (blockN + 1) / 2;
+    if (k < blockN)
+    {
+        g_data[base + k] += g_sums[blockIdx.x];
     }
 }

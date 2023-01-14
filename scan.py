@@ -13,14 +13,29 @@ test_cases = [
     (random_test_nums, random_test_nums.cumsum()),
 ] + [(np.ones(i), np.arange(1, i + 1)) for i in range(32)]
 def test(scan_func):
-    for input, output in test_cases:
-        try:
-            result = scan_func(input.copy())
-        except:
-            print(len(input), input)
-            raise
-        assert np.allclose(result, output), (len(input), input, result, output, output - result)
-    print(scan_func.__name__, 'passed')
+    try:
+        for input, output in test_cases:
+            try:
+                result = scan_func(input.copy())
+            except:
+                print(len(input), input)
+                raise
+            if not np.allclose(result, output):
+                print(scan_func.__name__, len(input), 'failed:')
+                print(input)
+                print(result, result[:10])
+                i = (output - result).argmin()
+                j = (output - result).argmax()
+                print(i, (output - result)[i - 5:i + 5])
+                print(j, (output - result)[i - 5:j + 5])
+                print(output - result)
+                assert False
+    except:
+        import traceback
+        traceback.print_exc()
+        print(scan_func.__name__, 'failed')
+    else:
+        print(scan_func.__name__, 'passed')
 
 T = 32
 def scan_slow(x):
@@ -159,6 +174,8 @@ mod = SourceModule(open("scan.cu").read())
 scan_slow_cuda = mod.get_function("scan_slow")
 scan_cuda = mod.get_function("scan")
 scan_padding_cuda = mod.get_function("scan_padding")
+scan_padding_sums_cuda = mod.get_function("scan_padding_sums")
+add_sums_cuda = mod.get_function("add_sums")
 
 copy_cuda = mod.get_function("copy")
 def copy_gpu(data: npt.ArrayLike) -> npt.NDArray[np.float32]:
@@ -242,6 +259,47 @@ import itertools
 for i in itertools.chain(range(32), range(33, 2048 + 1, 11)):
     stream_test(list(range(i)))
     stream_test(np.random.random_sample(i).astype(np.float32))
+
+def scan_large_gpu(x):
+    threads = 1024
+    block = 2 * threads
+    n = len(x)
+    if n <= block:
+        return scan_gpu(x)
+    x_ = np.asarray(x, dtype=np.float32)
+    x = cuda.pagelocked_empty_like(x_)
+    x[:] = x_
+    max_streams = threads
+    assert n <= block * max_streams
+    blocks = (n + block - 1) // block
+
+    s = cuda.Stream()
+    x_gpu = cuda.mem_alloc(x.nbytes)
+    bytes_in_float = 4
+    sums_gpu = cuda.mem_alloc(blocks * bytes_in_float)
+    cuda.memcpy_htod_async(x_gpu, x, stream=s)
+
+    scan_padding_sums_cuda(
+        x_gpu, x_gpu, np.int32(n), sums_gpu, stream=s,
+        block=(threads, 1, 1), grid=(blocks, 1), shared=bytes_in_float * (block + block // 16))
+
+    scan_padding_cuda(
+        sums_gpu, sums_gpu, np.int32(blocks), stream=s,
+        block=((blocks + 1) // 2, 1, 1), grid=(1,1), shared=bytes_in_float * (blocks + blocks // 16))
+
+    add_sums_cuda(x_gpu, sums_gpu, np.int32(n), stream=s,
+        block=(threads, 1, 1), grid=(blocks - 1, 1))
+
+    cuda.memcpy_dtoh_async(x, x_gpu, stream=s)
+
+    s.synchronize()
+
+    return x
+test_cases += [
+  (np.ones(i), np.arange(1, i + 1))
+  for i in [2049, 3000, 4095, 4096, 4097, 10000, 2048 * 1024 - 1, 2048 * 1024]
+]
+test(scan_large_gpu)
 
 a = np.random.random_sample(2048).astype(np.float32)
 print((scan_padding_gpu(a) - a.cumsum()).max())
