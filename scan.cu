@@ -184,3 +184,110 @@ __global__ void add_sums(float *g_data, float *g_sums, const int n)
         g_data[base + k] += g_sums[blockIdx.x];
     }
 }
+
+__device__ __forceinline__ void add_constant(float4 &a, float b)
+{
+    a.x += b;
+    a.y += b;
+    a.z += b;
+    a.w += b;
+}
+
+__device__ __forceinline__ void add_scans4(float4 &to, float4 &from)
+{
+    float sum = from.w;
+    to.x += sum;
+    to.y += sum;
+    to.z += sum;
+    to.w += sum;
+}
+
+__device__ __forceinline__ void scan4_into(float4 &to, float4 &from)
+{
+    to.x = from.x;
+    to.y = to.x + from.y;
+    to.z = to.y + from.z;
+    to.w = to.z + from.w;
+}
+
+__device__ void do_scan_padding4(float4 *g_odata, float4 *g_idata, const int n4, float4 *data)
+{
+    int base = 2 * blockDim.x * blockIdx.x;
+    int i = threadIdx.x;
+    if (2 * i < n4)
+    {
+        scan4_into(data[pad(i)], g_idata[base + i]);
+    }
+    int k = i + (n4 + 1) / 2;
+    if (k < n4)
+    {
+        scan4_into(data[pad(k)], g_idata[base + k]);
+    }
+    __syncthreads();
+    int depth_power;
+    for (depth_power = 1; depth_power < n4; depth_power <<= 1)
+    {
+        int offset = 2 * depth_power * (i + 1) - 1;
+        if (offset < n4)
+        {
+            add_scans4(data[pad(offset)], data[pad(offset - depth_power)]);
+        }
+        __syncthreads();
+    }
+    depth_power >>= 1;
+    for (; depth_power >= 1; depth_power >>= 1)
+    {
+        int offset = 2 * depth_power * (i + 1) - 1;
+        if (offset + depth_power < n4)
+        {
+            add_scans4(data[pad(offset + depth_power)], data[pad(offset)]);
+        }
+        __syncthreads();
+    }
+    if (2 * i < n4)
+    {
+        g_odata[base + i] = data[pad(i)];
+    }
+    if (k < n4)
+    {
+        g_odata[base + k] = data[pad(k)];
+    }
+}
+
+__global__ void scan_padding4(float4 *g_odata, float4 *g_idata, const int n4)
+{
+    assert(blockIdx.x == 0);
+    extern __shared__ float4 data4[];
+    do_scan_padding4(g_odata, g_idata, n4, data4);
+}
+
+__global__ void scan_padding_sums4(float4 *g_odata, float4 *g_idata, const int n4, float *g_sums)
+{
+    extern __shared__ float4 data4[];
+    const int block = 2 * blockDim.x;
+    const int blockN4 = min(block, n4 - block * blockIdx.x);
+    do_scan_padding4(g_odata, g_idata, blockN4, data4);
+    __syncthreads();
+    if (threadIdx.x == 0)
+    {
+        g_sums[blockIdx.x] = g_odata[block * blockIdx.x + blockN4 - 1].w;
+    }
+}
+
+__global__ void add_sums4(float4 *g_data, float *g_sums, const int n4)
+{
+    const int block = 2 * blockDim.x;
+    const int base = (blockIdx.x + 1) * block;
+    const int blockN4 = min(block, n4 - base);
+    float sum = g_sums[blockIdx.x];
+    int i = threadIdx.x;
+    if (2 * i < blockN4)
+    {
+        add_constant(g_data[base + i], sum);
+    }
+    int k = i + (blockN4 + 1) / 2;
+    if (k < blockN4)
+    {
+        add_constant(g_data[base + k], sum);
+    }
+}
