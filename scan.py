@@ -417,7 +417,17 @@ c = a.cumsum()
 numpy_time = time.perf_counter_ns() - start
 assert np.allclose(g, c, atol=len(a)/1e8, rtol=1e-4), (g - c)
 assert np.allclose(g4, c, atol=len(a)/1e8, rtol=1e-4), (g - c)
-print('gpu4', gpu4_time, 'gpu', gpu_time, 'numpy', numpy_time)
+print('2M floats gpu4', gpu4_time, 'gpu', gpu_time, 'numpy', numpy_time)
+
+a = np.random.random_sample(4 * 2048 * 1024).astype(np.float32)
+start = time.perf_counter_ns()
+g4 = scan_large_gpu4(a)
+gpu4_time = time.perf_counter_ns() - start
+start = time.perf_counter_ns()
+c = a.cumsum()
+numpy_time = time.perf_counter_ns() - start
+assert np.allclose(g4, c, atol=len(a)/1e8, rtol=1e-4), (g - c)
+print('8M floats gpu4', gpu4_time, 'numpy', numpy_time)
 
 import timeit
 gpu_times = []
