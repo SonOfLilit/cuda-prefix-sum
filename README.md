@@ -6,6 +6,8 @@ Inspired by Raph Levien's [blog post](https://raphlinus.github.io/gpu/2020/04/30
 
 Right now there is working code that can process up to 8M floats of data.
 
+I realised that I had a misunderstanding about how grids work, and I can actually write the whole thing as a single kernel that supports much much larger inputs. A prototype written with `numba` already runs in the numba simulator up to 1023 items but fails on 1024, hopefully I'll soon finish debugging it and it will run on huge inputs. I will then simplify the pyCUDA based kernel to use the same algorithm.
+
 ## Performance
 
 All performance measurements were made on a free Google Colab instance with a Tesla T4 GPU.
